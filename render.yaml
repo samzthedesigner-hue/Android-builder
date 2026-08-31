@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: android-builder
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+    healthCheckPath: /health
+    autoDeploy: true
+    repo: https://github.com/yourusername/android-builder
+    branch: main
