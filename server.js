@@ -23,7 +23,6 @@ const TOOLS_DIR = path.join(__dirname, 'tools');
 // Ensure directories exist
 fs.ensureDirSync(TEMP_DIR);
 fs.ensureDirSync(TOOLS_DIR);
-
 // ============================================
 // AUTO-DOWNLOAD REQUIRED FILES
 // ============================================
@@ -37,7 +36,6 @@ async function downloadFile(url, destPath) {
         const file = fs.createWriteStream(destPath);
         https.get(url, (response) => {
             if (response.statusCode === 302 || response.statusCode === 301) {
-                // Follow redirect
                 downloadFile(response.headers.location, destPath)
                     .then(resolve)
                     .catch(reject);
@@ -78,44 +76,7 @@ async function downloadFile(url, destPath) {
         });
     });
 }
-
 async function downloadAndroidJar() {
-    const urls = [
-        'https://storage.googleapis.com/android-sdk/platforms/android-34/android.jar',
-        'https://dl.google.com/android/repository/platform-34_r01.zip',
-        'https://maven.google.com/android/android.jar'
-    ];
-    
-    for (const url of urls) {
-        try {
-            await downloadFile(url, ANDROID_JAR);
-            return true;
-        } catch (error) {
-            console.warn(`⚠ Failed to download from ${url}: ${error.message}`);
-            continue;
-        }
-    }
-    
-    // If all downloads fail, try to extract from ZIP
-    try {
-        const zipPath = path.join(__dirname, 'platform-34_r01.zip');
-        if (fs.existsSync(zipPath)) {
-            console.log('📦 Extracting android.jar from ZIP...');
-            const unzip = require('child_process').spawn('unzip', ['-j', zipPath, 'android-34/android.jar', '-d', __dirname]);
-            await new Promise((resolve, reject) => {
-                unzip.on('close', (code) => {
-                    if (code === 0) resolve();
-                    else reject(new Error('Extraction failed'));
-                });
-            });
-            fs.unlinkSync(zipPath);
-            return true;
-        }
-    } catch (error) {
-        console.warn('⚠ ZIP extraction failed:', error.message);
-    }
-    
-    return false;
 }
 
 async function ensureDependencies() {
@@ -123,7 +84,6 @@ async function ensureDependencies() {
     console.log('   🔧 Checking Dependencies');
     console.log('═══════════════════════════════════════');
     
-    // 1. Check for android.jar
     if (!fs.existsSync(ANDROID_JAR)) {
         console.log('⚠ android.jar not found. Downloading...');
         const success = await downloadAndroidJar();
@@ -136,7 +96,6 @@ async function ensureDependencies() {
         console.log('✅ android.jar found');
     }
     
-    // 2. Check for debug.keystore
     if (!fs.existsSync(KEYSTORE_PATH)) {
         console.log('⚠ debug.keystore not found. Generating...');
         try {
@@ -153,7 +112,6 @@ async function ensureDependencies() {
         console.log('✅ debug.keystore found');
     }
     
-    // 3. Check for build tools (d8, aapt, zipalign, apksigner)
     console.log('\n🔍 Checking Android build tools...');
     
     const tools = ['d8', 'aapt', 'zipalign', 'apksigner'];
@@ -168,7 +126,6 @@ async function ensureDependencies() {
     
     console.log('═══════════════════════════════════════\n');
 }
-
 // ============================================
 // HEALTH CHECK ENDPOINT
 // ============================================
@@ -199,14 +156,12 @@ function checkTool(tool) {
         return false;
     }
 }
-
 // ============================================
-// MAIN BUILD ENDPOINT
+// MAIN BUILD ENDPOINT (full APK: compile -> dex -> package -> sign)
 // ============================================
 app.post('/build', async (req, res) => {
     const { code, packageName = 'com.user.app', appName = 'MyApp' } = req.body;
     
-    // Validate input
     if (!code || code.trim().length === 0) {
         return res.status(400).json({ error: 'No code provided' });
     }
@@ -215,7 +170,6 @@ app.post('/build', async (req, res) => {
         return res.status(400).json({ error: 'Code too large (max 100KB)' });
     }
     
-    // Check for android.jar
     if (!fs.existsSync(ANDROID_JAR)) {
         console.error('❌ android.jar not found!');
         return res.status(500).json({ 
@@ -223,7 +177,6 @@ app.post('/build', async (req, res) => {
         });
     }
     
-    // Generate unique build ID
     const buildId = crypto.randomBytes(8).toString('hex');
     const buildDir = path.join(TEMP_DIR, buildId);
     const startTime = Date.now();
@@ -233,41 +186,33 @@ app.post('/build', async (req, res) => {
     console.log(`[${buildId}] 📝 Code length: ${code.length} chars`);
     
     try {
-        // 1. Create project structure
         await createProjectStructure(buildDir, code, packageName, appName);
         console.log(`[${buildId}] ✅ Project structure created`);
         
-        // 2. Compile Java to .class
         await compileJava(buildDir);
         console.log(`[${buildId}] ✅ Java compiled`);
         
-        // 3. Convert .class to .dex
         await convertToDex(buildDir);
         console.log(`[${buildId}] ✅ DEX generated`);
         
-        // 4. Package APK
         await packageApk(buildDir);
         console.log(`[${buildId}] ✅ APK packaged`);
         
-        // 5. Sign APK
         await signApk(buildDir);
         console.log(`[${buildId}] ✅ APK signed`);
         
-        // 6. Send APK back
         const apkPath = path.join(buildDir, 'app-debug.apk');
         const apkSize = fs.statSync(apkPath).size;
         const duration = ((Date.now() - startTime) / 1000).toFixed(1);
         
         console.log(`[${buildId}] ✅ Build complete! APK: ${(apkSize/1024/1024).toFixed(2)} MB, Duration: ${duration}s`);
         
-        // Send the APK
         res.setHeader('Content-Type', 'application/vnd.android.package-archive');
         res.setHeader('Content-Disposition', `attachment; filename="${appName}.apk"`);
         res.setHeader('X-Build-Duration', duration);
         res.setHeader('X-APK-Size', apkSize);
         
         res.sendFile(apkPath, (err) => {
-            // Cleanup after sending
             fs.removeSync(buildDir);
             console.log(`[${buildId}] 🧹 Cleaned up build directory`);
         });
@@ -275,7 +220,6 @@ app.post('/build', async (req, res) => {
     } catch (error) {
         console.error(`[${buildId}] ❌ Build error:`, error.message);
         
-        // Cleanup on error
         try {
             fs.removeSync(buildDir);
         } catch (cleanupError) {
@@ -288,9 +232,74 @@ app.post('/build', async (req, res) => {
         });
     }
 });
-
 // ============================================
-// BUILD FUNCTIONS
+// RUN ENDPOINT (plain javac/java — no APK, just stdout back to Console)
+// ============================================
+function detectClassName(code) {
+    const match = code.match(/public\s+class\s+(\w+)/);
+    return match ? match[1] : 'Main';
+}
+
+async function createPlainJavaProject(dir, code) {
+    const srcDir = path.join(dir, 'src');
+    fs.ensureDirSync(srcDir);
+    const className = detectClassName(code);
+    fs.writeFileSync(path.join(srcDir, className + '.java'), code);
+    return className;
+}
+
+async function compilePlainJava(dir) {
+    const srcDir = path.join(dir, 'src');
+    const classesDir = path.join(dir, 'classes');
+    fs.ensureDirSync(classesDir);
+
+    const javaFiles = [];
+    walkDir(srcDir, (file) => { if (file.endsWith('.java')) javaFiles.push(file); });
+    if (javaFiles.length === 0) throw new Error('No Java files found to compile');
+
+    const cmd = `javac -d ${classesDir} ${javaFiles.join(' ')}`;
+    await execPromise(cmd, { timeout: 30000 });
+    return classesDir;
+}
+
+app.post('/run', async (req, res) => {
+    const { code } = req.body;
+
+    if (!code || code.trim().length === 0) {
+        return res.status(400).json({ error: 'No code provided' });
+    }
+    if (code.trim().length > 100000) {
+        return res.status(400).json({ error: 'Code too large (max 100KB)' });
+    }
+
+    const runId = crypto.randomBytes(8).toString('hex');
+    const runDir = path.join(TEMP_DIR, 'run-' + runId);
+
+    console.log(`[${runId}] ▶ Run requested, code length: ${code.length} chars`);
+
+    try {
+        const className = await createPlainJavaProject(runDir, code);
+        const classesDir = await compilePlainJava(runDir);
+        console.log(`[${runId}] ✅ Compiled ${className}.java`);
+
+        // NOTE: stdin is not connected — Scanner/System.in in user code
+        // will hang until this timeout and return an error to the client.
+        const output = await execPromise(
+            `java -cp ${classesDir} ${className}`,
+            { timeout: 10000 }
+        );
+
+        console.log(`[${runId}] ✅ Run complete`);
+        res.json({ output: output || '' });
+    } catch (error) {
+        console.error(`[${runId}] ❌ Run error:`, error.message);
+        res.status(500).json({ error: error.message });
+    } finally {
+        try { fs.removeSync(runDir); } catch (e) { /* ignore */ }
+    }
+});
+// ============================================
+// BUILD FUNCTIONS (used by /build only)
 // ============================================
 
 async function createProjectStructure(dir, code, packageName, appName) {
@@ -407,7 +416,6 @@ async function compileJava(dir) {
     try {
         await execPromise(cmd, { timeout: 30000 });
     } catch (error) {
-        // Try without source/target flags
         const fallbackCmd = `javac -d ${classesDir} -cp ${ANDROID_JAR} ${javaFiles.join(' ')}`;
         await execPromise(fallbackCmd, { timeout: 30000 });
     }
@@ -429,7 +437,6 @@ async function convertToDex(dir) {
         throw new Error('No .class files found to convert to DEX');
     }
     
-    // Try d8 first
     try {
         const cmd = `d8 --lib ${ANDROID_JAR} --output ${dexDir} ${classFiles.join(' ')}`;
         await execPromise(cmd, { timeout: 30000 });
@@ -438,7 +445,6 @@ async function convertToDex(dir) {
         console.warn('d8 failed, trying dx...');
     }
     
-    // Try dx as fallback
     try {
         const cmd = `dx --dex --output=${path.join(dexDir, 'classes.dex')} ${classFiles.join(' ')}`;
         await execPromise(cmd, { timeout: 30000 });
@@ -447,7 +453,6 @@ async function convertToDex(dir) {
         throw new Error('DEX conversion failed: ' + error.message);
     }
 }
-
 async function packageApk(dir) {
     const dexDir = path.join(dir, 'dex');
     const manifestPath = path.join(dir, 'AndroidManifest.xml');
@@ -478,7 +483,6 @@ async function packageApk(dir) {
         await execPromise(zipCmd, { timeout: 30000 });
     }
     
-    // Zipalign
     const alignedApk = path.join(dir, 'app-aligned.apk');
     try {
         await execPromise(`zipalign -f -v 4 ${unalignedApk} ${alignedApk}`, { timeout: 30000 });
@@ -492,7 +496,6 @@ async function signApk(dir) {
     const alignedApk = path.join(dir, 'app-aligned.apk');
     const signedApk = path.join(dir, 'app-debug.apk');
     
-    // Generate debug keystore if missing
     if (!fs.existsSync(KEYSTORE_PATH)) {
         try {
             const genCmd = `keytool -genkey -v -keystore ${KEYSTORE_PATH} -alias androiddebugkey ` +
@@ -506,7 +509,6 @@ async function signApk(dir) {
         }
     }
     
-    // Try apksigner
     try {
         const signCmd = `apksigner sign --ks ${KEYSTORE_PATH} --ks-pass pass:android --key-pass pass:android ` +
                        `--out ${signedApk} ${alignedApk}`;
@@ -526,7 +528,6 @@ async function signApk(dir) {
         }
     }
 }
-
 // ============================================
 // UTILITY FUNCTIONS
 // ============================================
@@ -571,7 +572,6 @@ function execPromise(cmd, options = {}) {
 
 const PORT = process.env.PORT || 3000;
 
-// Run dependency check on startup
 ensureDependencies().then(() => {
     app.listen(PORT, () => {
         console.log('═══════════════════════════════════════');
@@ -584,12 +584,12 @@ ensureDependencies().then(() => {
         console.log('═══════════════════════════════════════');
         console.log('   Health Check: /health');
         console.log('   Build Endpoint: POST /build');
+        console.log('   Run Endpoint:   POST /run');
         console.log('═══════════════════════════════════════');
         console.log('   Ready for builds! 🚀');
     });
 });
 
-// Cleanup on exit
 process.on('exit', () => {
     console.log('🧹 Cleaning up temp directory...');
     try {
